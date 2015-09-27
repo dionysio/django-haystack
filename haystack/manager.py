@@ -13,6 +13,9 @@ class SearchIndexManager(object):
         """
         return SearchQuerySet(using=self.using)
 
+    def range_facet(self, field, **options):
+        return self.get_search_queryset().range_facet(field, **options)
+
     def get_empty_query_set(self):
         return EmptySearchQuerySet(using=self.using)
 

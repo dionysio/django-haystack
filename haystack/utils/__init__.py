@@ -7,10 +7,7 @@ from django.utils import six
 from haystack.constants import ID, DJANGO_CT, DJANGO_ID
 from haystack.utils.highlighting import Highlighter
 
-try:
-    from django.utils import importlib
-except ImportError:
-    import importlib
+import importlib
 
 IDENTIFIER_REGEX = re.compile('^[\w\d_]+\.[\w\d_]+\.\d+$')
 
@@ -30,7 +27,7 @@ def default_get_identifier(obj_or_string):
 
     return u"%s.%s.%s" % (
         obj_or_string._meta.app_label,
-        obj_or_string._meta.module_name,
+        obj_or_string._meta.model_name,
         obj_or_string._get_pk_val()
     )
 
@@ -68,7 +65,7 @@ get_identifier = _lookup_identifier_method()
 
 
 def get_model_ct(model):
-    return "%s.%s" % (model._meta.app_label, model._meta.module_name)
+    return "%s.%s" % (model._meta.app_label, model._meta.model_name)
 
 
 def get_facet_field_name(fieldname):

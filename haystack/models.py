@@ -7,6 +7,7 @@ from django.utils import six
 from django.utils.text import capfirst
 from haystack.exceptions import NotHandled, SpatialError
 from haystack.utils import log as logging
+from django.apps import apps
 
 try:
     from django.utils.encoding import force_text
@@ -95,7 +96,7 @@ class SearchResult(object):
 
     def _get_model(self):
         if self._model is None:
-            self._model = models.get_model(self.app_label, self.model_name)
+            self._model = apps.get_model(self.app_label, self.model_name)
 
         return self._model
 
