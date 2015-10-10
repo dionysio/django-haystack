@@ -1,5 +1,8 @@
-from __future__ import unicode_literals
-from haystack.query import SearchQuerySet, EmptySearchQuerySet
+# encoding: utf-8
+
+from __future__ import absolute_import, division, print_function, unicode_literals
+
+from haystack.query import EmptySearchQuerySet, SearchQuerySet
 
 
 class SearchIndexManager(object):
@@ -12,9 +15,6 @@ class SearchIndexManager(object):
         to easily customize the behavior of the Manager.
         """
         return SearchQuerySet(using=self.using)
-
-    def range_facet(self, field, **options):
-        return self.get_search_queryset().range_facet(field, **options)
 
     def get_empty_query_set(self):
         return EmptySearchQuerySet(using=self.using)
@@ -39,9 +39,6 @@ class SearchIndexManager(object):
 
     def order_by(self, *args):
         return self.get_search_queryset().order_by(*args)
-
-    def order_by_distance(self, **kwargs):
-        return self.get_search_queryset().order_by_distance(**kwargs)
 
     def highlight(self):
         return self.get_search_queryset().highlight()

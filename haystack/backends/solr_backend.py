@@ -1,16 +1,21 @@
-from __future__ import unicode_literals
+# encoding: utf-8
+
+from __future__ import absolute_import, division, print_function, unicode_literals
+
 import warnings
+
 from django.conf import settings
 from django.core.exceptions import ImproperlyConfigured
-from django.db.models.loading import get_model
 from django.utils import six
-from haystack.backends import BaseEngine, BaseSearchBackend, BaseSearchQuery, log_query, EmptyResults
-from haystack.constants import ID, DJANGO_CT, DJANGO_ID
-from haystack.exceptions import MissingDependency, MoreLikeThisError
-from haystack.inputs import PythonData, Clean, Exact, Raw
+
+from haystack.backends import BaseEngine, BaseSearchBackend, BaseSearchQuery, EmptyResults, log_query
+from haystack.constants import DJANGO_CT, DJANGO_ID, ID
+from haystack.exceptions import MissingDependency, MoreLikeThisError, SkipDocument
+from haystack.inputs import Clean, Exact, PythonData, Raw
 from haystack.models import SearchResult
-from haystack.utils import get_identifier
 from haystack.utils import log as logging
+from haystack.utils import get_identifier, get_model_ct
+from haystack.utils.app_loading import haystack_get_model
 
 try:
     from pysolr import Solr, SolrError
@@ -49,6 +54,8 @@ class SolrSearchBackend(BaseSearchBackend):
         for obj in iterable:
             try:
                 docs.append(index.full_prepare(obj))
+            except SkipDocument:
+                self.log.debug(u"Indexing for object `%s` skipped", obj)
             except UnicodeDecodeError:
                 if not self.silently_fail:
                     raise
@@ -96,12 +103,13 @@ class SolrSearchBackend(BaseSearchBackend):
                 models_to_delete = []
 
                 for model in models:
-                    models_to_delete.append("%s:%s.%s" % (DJANGO_CT, model._meta.app_label, model._meta.model_name))
+                    models_to_delete.append("%s:%s" % (DJANGO_CT, get_model_ct(model)))
 
                 self.conn.delete(q=" OR ".join(models_to_delete), commit=commit)
 
-            # Run an optimize post-clear. http://wiki.apache.org/solr/FAQ#head-9aafb5d8dff5308e8ea4fcf4b71f19f029c4bb99
-            self.conn.optimize()
+            if commit:
+                # Run an optimize post-clear. http://wiki.apache.org/solr/FAQ#head-9aafb5d8dff5308e8ea4fcf4b71f19f029c4bb99
+                self.conn.optimize()
         except (IOError, SolrError) as e:
             if not self.silently_fail:
                 raise
@@ -134,7 +142,7 @@ class SolrSearchBackend(BaseSearchBackend):
 
     def build_search_kwargs(self, query_string, sort_by=None, start_offset=0, end_offset=None,
                             fields='', highlight=False, facets=None,
-                            date_facets=None, query_facets=None, range_facets=None,
+                            date_facets=None, query_facets=None,
                             narrow_queries=None, spelling_query=None,
                             within=None, dwithin=None, distance_point=None,
                             models=None, limit_to_registered_models=None,
@@ -211,21 +219,11 @@ class SolrSearchBackend(BaseSearchBackend):
             kwargs['facet'] = 'on'
             kwargs['facet.query'] = ["%s:%s" % (field, value) for field, value in query_facets]
 
-        if range_facets is not None:
-            kwargs['facet'] = 'on'
-            for field, options in range_facets.items():
-                kwargs['facet.range'] = field
-                for key, value in options.items():
-                    if key in ['start', 'end', 'gap', 'hardend', 'other', 'include'] or 1:
-                        if key == 'hardend':
-                            value = 'true' if value else ''
-                        kwargs['f.%s.facet.range.%s' % (field, key)] = value
-
         if limit_to_registered_models is None:
             limit_to_registered_models = getattr(settings, 'HAYSTACK_LIMIT_TO_REGISTERED_MODELS', True)
 
         if models and len(models):
-            model_choices = sorted(['%s.%s' % (model._meta.app_label, model._meta.model_name) for model in models])
+            model_choices = sorted(get_model_ct(model) for model in models)
         elif limit_to_registered_models:
             # Using narrow queries, limit the results to only models handled
             # with the current routers.
@@ -307,7 +305,7 @@ class SolrSearchBackend(BaseSearchBackend):
             limit_to_registered_models = getattr(settings, 'HAYSTACK_LIMIT_TO_REGISTERED_MODELS', True)
 
         if models and len(models):
-            model_choices = sorted(['%s.%s' % (model._meta.app_label, model._meta.model_name) for model in models])
+            model_choices = sorted(get_model_ct(model) for model in models)
         elif limit_to_registered_models:
             # Using narrow queries, limit the results to only models handled
             # with the current routers.
@@ -359,7 +357,6 @@ class SolrSearchBackend(BaseSearchBackend):
                 'fields': raw_results.facets.get('facet_fields', {}),
                 'dates': raw_results.facets.get('facet_dates', {}),
                 'queries': raw_results.facets.get('facet_queries', {}),
-				'ranges': raw_results.facets.get('facet_ranges', {}),
             }
 
             for key in ['fields']:
@@ -381,12 +378,16 @@ class SolrSearchBackend(BaseSearchBackend):
         for raw_result in raw_results.docs:
             app_label, model_name = raw_result[DJANGO_CT].split('.')
             additional_fields = {}
-            model = get_model(app_label, model_name)
+            model = haystack_get_model(app_label, model_name)
 
             if model and model in indexed_models:
+                index = unified_index.get_index(model)
+                index_field_map = index.field_map
                 for key, value in raw_result.items():
-                    index = unified_index.get_index(model)
                     string_key = str(key)
+                    # re-map key if alternate name used
+                    if string_key in index_field_map:
+                        string_key = index_field_map[key]
 
                     if string_key in index.fields and hasattr(index.fields[string_key], 'convert'):
                         additional_fields[string_key] = index.fields[string_key].convert(value)
@@ -518,25 +519,6 @@ class SolrSearchQuery(BaseSearchQuery):
     def matching_all_fragment(self):
         return '*:*'
 
-    def add_spatial(self, lat, lon, sfield, distance, filter='bbox'):
-        """Adds spatial query parameters to search query"""
-        kwargs = {
-            'lat': lat,
-            'long': long,
-            'sfield': sfield,
-            'distance': distance,
-        }
-        self.spatial_query.update(kwargs)
-
-    def add_order_by_distance(self, lat, long, sfield):
-        """Orders the search result by distance from point."""
-        kwargs = {
-            'lat': lat,
-            'long': long,
-            'sfield': sfield,
-        }
-        self.order_by_distance.update(kwargs)
-
     def build_query_fragment(self, field, filter_type, value):
         from haystack import connections
         query_frag = ''
@@ -603,7 +585,7 @@ class SolrSearchQuery(BaseSearchQuery):
             elif filter_type == 'range':
                 start = self.backend.conn._from_python(prepared_value[0])
                 end = self.backend.conn._from_python(prepared_value[1])
-                query_frag = u'["%s" TO "%s"]' % (start, end)
+                query_frag = u'[%s TO %s]' % (start, end)
             elif filter_type == 'exact':
                 if value.input_type_name == 'exact':
                     query_frag = prepared_value
@@ -684,9 +666,6 @@ class SolrSearchQuery(BaseSearchQuery):
 
         if self.query_facets:
             search_kwargs['query_facets'] = self.query_facets
-
-        if self.range_facets:
-            search_kwargs['range_facets'] = self.range_facets
 
         if self.within:
             search_kwargs['within'] = self.within

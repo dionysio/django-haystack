@@ -12,6 +12,7 @@ from haystack.constants import VALID_FILTERS, FILTER_SEPARATOR, DEFAULT_ALIAS
 from haystack.exceptions import MoreLikeThisError, FacetingError
 from haystack.models import SearchResult
 from haystack.utils.loading import UnifiedIndex
+from haystack.utils import get_model_ct
 
 try:
     from django.utils.encoding import force_text
@@ -192,7 +193,7 @@ class BaseSearchBackend(object):
         models = []
 
         for model in connections[self.connection_alias].get_unified_index().get_indexed_models():
-            models.append(u"%s.%s" % (model._meta.app_label, model._meta.model_name))
+            models.append(get_model_ct(model))
 
         return models
 
@@ -453,7 +454,6 @@ class BaseSearchQuery(object):
         self.facets = {}
         self.date_facets = {}
         self.query_facets = []
-        self.range_facets = {}
         self.narrow_queries = set()
         #: If defined, fields should be a list of field names - no other values
         #: will be retrieved so the caller must be careful to include django_ct
@@ -798,23 +798,12 @@ class BaseSearchQuery(object):
         """Orders the search result by a field."""
         self.order_by.append(field)
 
-    def add_order_by_distance(self, **kwargs):
-        """Orders the search result by distance from point."""
-        raise NotImplementedError("Subclasses must provide a way to add order by distance in the 'add_order_by_distance' method.")
-
     def clear_order_by(self):
         """
         Clears out all ordering that has been already added, reverting the
         query to relevancy.
         """
         self.order_by = []
-
-    def clear_order_by_distance(self):
-        """
-        Clears out all distance ordering that has been already added, reverting the
-        query to relevancy.
-        """
-        self.order_by_distance = []
 
     def add_model(self, model):
         """
@@ -908,10 +897,6 @@ class BaseSearchQuery(object):
         field_name = connections[self._using].get_unified_index().get_facet_fieldname(field)
         self.facets[field_name] = options.copy()
 
-    def _get_facet_fieldname(self, field):
-        from haystack import connections
-        return connections[self._using].get_unified_index().get_facet_fieldname(field)
-
     def add_date_facet(self, field, start_date, end_date, gap_by, gap_amount=1):
         """Adds a date-based facet on a field."""
         from haystack import connections
@@ -938,10 +923,6 @@ class BaseSearchQuery(object):
         Generally used in conjunction with faceting.
         """
         self.narrow_queries.add(query)
-
-
-    def add_range_facet(self, field, **options):
-        self.range_facets[self._get_facet_fieldname(field)] = options
 
     def set_result_class(self, klass):
         """
@@ -1014,7 +995,6 @@ class BaseSearchQuery(object):
         clone.facets = self.facets.copy()
         clone.date_facets = self.date_facets.copy()
         clone.query_facets = self.query_facets[:]
-        clone.range_facets = self.range_facets.copy()
         clone.narrow_queries = self.narrow_queries.copy()
         clone.start_offset = self.start_offset
         clone.end_offset = self.end_offset
