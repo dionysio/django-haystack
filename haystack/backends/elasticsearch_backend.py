@@ -22,7 +22,7 @@ from haystack.utils.app_loading import haystack_get_model
 
 try:
     import elasticsearch
-    from elasticsearch.helpers import parallel_bulk as bulk_index
+    from elasticsearch.helpers import bulk as bulk_index
     from elasticsearch.exceptions import NotFoundError
 except ImportError:
     raise MissingDependency("The 'elasticsearch' backend requires the installation of 'elasticsearch'. Please refer to the documentation.")
