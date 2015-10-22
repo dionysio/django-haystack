@@ -472,6 +472,9 @@ class SolrSearchBackend(BaseSearchBackend):
                 if field_data['type'] == 'text_en':
                     field_data['type'] = 'string'
 
+            field_data['omit_norms'] = str(field_class.omit_norms).lower()
+            field_data['term_vectors'] = str(field_class.term_vectors).lower()
+
             # If it's a ``FacetField``, make sure we don't postprocess it.
             if hasattr(field_class, 'facet_for'):
                 # If it's text, it ought to be a string.
@@ -585,7 +588,7 @@ class SolrSearchQuery(BaseSearchQuery):
             elif filter_type == 'range':
                 start = self.backend.conn._from_python(prepared_value[0])
                 end = self.backend.conn._from_python(prepared_value[1])
-                query_frag = u'[%s TO %s]' % (start, end)
+                query_frag = u'["%s" TO "%s"]' % (start, end)
             elif filter_type == 'exact':
                 if value.input_type_name == 'exact':
                     query_frag = prepared_value

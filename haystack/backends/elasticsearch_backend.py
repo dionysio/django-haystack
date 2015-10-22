@@ -22,7 +22,7 @@ from haystack.utils.app_loading import haystack_get_model
 
 try:
     import elasticsearch
-    from elasticsearch.helpers import bulk_index
+    from elasticsearch.helpers import parallel_bulk as bulk_index
     from elasticsearch.exceptions import NotFoundError
 except ImportError:
     raise MissingDependency("The 'elasticsearch' backend requires the installation of 'elasticsearch'. Please refer to the documentation.")
@@ -126,13 +126,10 @@ class ElasticsearchSearchBackend(BaseSearchBackend):
 
         unified_index = haystack.connections[self.connection_alias].get_unified_index()
         self.content_field_name, field_mapping = self.build_schema(unified_index.all_searchfields())
+
         current_mapping = {
             'modelresult': {
                 'properties': field_mapping,
-                '_boost': {
-                    'name': 'boost',
-                    'null_value': 1.0
-                }
             }
         }
 
@@ -338,7 +335,7 @@ class ElasticsearchSearchBackend(BaseSearchBackend):
             narrow_queries = set()
 
         if facets is not None:
-            kwargs.setdefault('facets', {})
+            kwargs.setdefault('aggregations', {})
 
             for facet_fieldname, extra_options in facets.items():
                 facet_options = {
@@ -354,10 +351,10 @@ class ElasticsearchSearchBackend(BaseSearchBackend):
                 if 'facet_filter' in extra_options:
                     facet_options['facet_filter'] = extra_options.pop('facet_filter')
                 facet_options['terms'].update(extra_options)
-                kwargs['facets'][facet_fieldname] = facet_options
+                kwargs['aggregations'][facet_fieldname] = facet_options
 
         if date_facets is not None:
-            kwargs.setdefault('facets', {})
+            kwargs.setdefault('aggregations', {})
 
             for facet_fieldname, value in date_facets.items():
                 # Need to detect on gap_by & only add amount if it's more than one.
@@ -368,7 +365,7 @@ class ElasticsearchSearchBackend(BaseSearchBackend):
                     # Just the first character is valid for use.
                     interval = "%s%s" % (value['gap_amount'], interval[:1])
 
-                kwargs['facets'][facet_fieldname] = {
+                kwargs['aggregations'][facet_fieldname] = {
                     'date_histogram': {
                         'field': facet_fieldname,
                         'interval': interval,
@@ -384,14 +381,16 @@ class ElasticsearchSearchBackend(BaseSearchBackend):
                 }
 
         if query_facets is not None:
-            kwargs.setdefault('facets', {})
+            kwargs.setdefault('aggregations', {})
 
             for facet_fieldname, value in query_facets:
-                kwargs['facets'][facet_fieldname] = {
-                    'query': {
-                        'query_string': {
-                            'query': value,
-                        }
+                kwargs['aggregations'][facet_fieldname] = {
+                    'filter': {
+                        'query': {
+                            'query_string': {
+                                'query': value,
+                            }
+                        },
                     },
                 }
 
@@ -572,22 +571,25 @@ class ElasticsearchSearchBackend(BaseSearchBackend):
             if raw_suggest:
                 spelling_suggestion = ' '.join([word['text'] if len(word['options']) == 0 else word['options'][0]['text'] for word in raw_suggest])
 
-        if 'facets' in raw_results:
+        if 'aggregations' in raw_results:
             facets = {
                 'fields': {},
                 'dates': {},
                 'queries': {},
             }
 
-            for facet_fieldname, facet_info in raw_results['facets'].items():
-                if facet_info.get('_type', 'terms') == 'terms':
-                    facets['fields'][facet_fieldname] = [(individual['term'], individual['count']) for individual in facet_info['terms']]
+            for facet_fieldname, facet_info in raw_results['aggregations'].items():
+                try:
+                    facets['fields'][facet_fieldname] = [(individual['key'], individual['doc_count']) for individual in facet_info['buckets']]
+                except KeyError:
+                    pass
+                """
                 elif facet_info.get('_type', 'terms') == 'date_histogram':
                     # Elasticsearch provides UTC timestamps with an extra three
                     # decimals of precision, which datetime barfs on.
-                    facets['dates'][facet_fieldname] = [(datetime.datetime.utcfromtimestamp(individual['time'] / 1000), individual['count']) for individual in facet_info['entries']]
+                    facets['dates'][facet_fieldname] = [(datetime.datetime.utcfromtimestamp(individual['time'] / 1000), individual['doc_count']) for individual in facet_info['entries']]
                 elif facet_info.get('_type', 'terms') == 'query':
-                    facets['queries'][facet_fieldname] = facet_info['count']
+                    facets['queries'][facet_fieldname] = facet_info['doc_count']"""
 
         unified_index = connections[self.connection_alias].get_unified_index()
         indexed_models = unified_index.get_indexed_models()
@@ -632,7 +634,7 @@ class ElasticsearchSearchBackend(BaseSearchBackend):
         return {
             'results': results,
             'hits': hits,
-            'facets': facets,
+            'aggregations': facets,
             'spelling_suggestion': spelling_suggestion,
         }
 
@@ -650,6 +652,9 @@ class ElasticsearchSearchBackend(BaseSearchBackend):
 
             if field_class.document is True:
                 content_field_name = field_class.index_fieldname
+
+            if field_class.stored is True:
+                field_mapping['store'] = 'yes'
 
             # Do this last to override `text` fields.
             if field_mapping['type'] == 'string':
@@ -914,6 +919,7 @@ class ElasticsearchSearchQuery(BaseSearchQuery):
             search_kwargs.update(kwargs)
 
         results = self.backend.search(final_query, **search_kwargs)
+
         self._results = results.get('results', [])
         self._hit_count = results.get('hits', 0)
         self._facet_counts = self.post_process_facets(results)
@@ -938,6 +944,27 @@ class ElasticsearchSearchQuery(BaseSearchQuery):
         self._results = results.get('results', [])
         self._hit_count = results.get('hits', 0)
 
+
+    def post_process_facets(self, results):
+        # Handle renaming the facet fields. Undecorate and all that.
+        from haystack import connections
+        revised_facets = {}
+        field_data = connections[self._using].get_unified_index().all_searchfields()
+
+
+        for facet_type, field_details in results.get('aggregations', {}).items():
+            temp_facets = {}
+
+            for field, field_facets in field_details.items():
+                fieldname = field
+                if field in field_data and hasattr(field_data[field], 'get_facet_for_name'):
+                    fieldname = field_data[field].get_facet_for_name()
+
+                temp_facets[fieldname] = field_facets
+
+            revised_facets[facet_type] = temp_facets
+
+        return revised_facets
 
 class ElasticsearchSearchEngine(BaseEngine):
     backend = ElasticsearchSearchBackend

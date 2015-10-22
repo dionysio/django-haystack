@@ -7,7 +7,6 @@ import sys
 import warnings
 from datetime import timedelta
 from optparse import make_option
-import django
 
 try:
     from django.db import close_old_connections
@@ -17,6 +16,7 @@ except ImportError:
 
 from django.core.management.base import LabelCommand
 from django.db import reset_queries
+from django import setup
 
 from haystack import connections as haystack_connections
 from haystack.query import SearchQuerySet
@@ -43,6 +43,7 @@ DEFAULT_BATCH_SIZE = None
 DEFAULT_AGE = None
 APP = 'app'
 MODEL = 'model'
+setup()
 
 def worker(bits):
     # We need to reset the connections, otherwise the different processes
@@ -242,10 +243,12 @@ class Command(LabelCommand):
 
             qs.update(indexable=0)
 
-            if self.remove:
-                deleted = index.get_deleted()
+            if model.__name__ == 'Video':
 
-                for video_id in deleted:
-                    backend.remove('main.video.'+video_id, commit=self.commit)
+                if self.remove:
+                    deleted = index.get_deleted()
 
-                deleted.update(removed_from_index=True)
+                    for video_id in deleted.values_list('video_id', flat=True):
+                        backend.remove('main.video.'+video_id, commit=self.commit)
+
+                    deleted.update(removed_from_index=True)
